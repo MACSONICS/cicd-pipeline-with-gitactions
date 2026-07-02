@@ -1,0 +1,72 @@
+name: Flask Deploy
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+
+  deploy:
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        run: |
+          cd terraform
+          terraform init
+
+      - name: Terraform Apply
+        run: |
+          cd terraform
+          terraform apply -auto-approve
+
+      - name: Create Application Package
+        run: |
+          zip -r app.zip app
+
+      - name: Upload App To S3
+        run: |
+          aws s3 cp app.zip \
+            s3://${{ secrets.S3_BUCKET }}/app.zip
+
+      - name: Get Instance ID
+        run: |
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters Name=tag:Name,Values=FlaskApplication \
+            --query 'Reservations[*].Instances[*].InstanceId' \
+            --output text)
+
+          echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
+
+      - name: Deploy To EC2
+        run: |
+
+          aws ssm send-command \
+          --instance-ids $INSTANCE_ID \
+          --document-name AWS-RunShellScript \
+          --parameters commands="
+            mkdir -p /opt/application;
+            cd /opt/application;
+            aws s3 cp s3://${{ secrets.S3_BUCKET }}/app.zip .;
+            unzip -o app.zip;
+            cd app;
+            pip3 install -r requirements.txt;
+            pkill -f app.py || true;
+            nohup python3 app.py > app.log 2>&1 &
+          "
